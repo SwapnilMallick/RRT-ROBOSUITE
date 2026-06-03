@@ -1,0 +1,45 @@
+# Activate the virtual environment that has robosuite installed
+source /Users/swapnilmallick/Desktop/VLM_JUDGE/vlm_judge_env/bin/activate
+
+# Then run the script normally
+python rrt_panda.py                       # plan + execute (default 5000 iters)
+python rrt_panda.py --no_exec             # plan only, save tree.png + plan.npz
+python rrt_panda.py --render              # show MuJoCo viewer during execution
+python rrt_panda.py --show                # show matplotlib tree plot
+python rrt_panda.py --step_size 0.05 --goal_threshold 0.02 --max_iters 10000
+
+# Deactivate when done
+deactivate
+
+
+Git commands:
+
+# 1. Initialize git (if not already done)
+git init
+
+# 2. Add the remote repository
+git remote add origin https://github.com/<username>/<repo-name>.git
+
+# 3. Verify the remote
+git remote -v
+
+# 4. Check what changed
+git status
+
+# 5. Stage files
+git add <filename>
+# or stage everything
+git add .
+
+# 6. Commit with a message
+git commit -m "your commit message"
+
+# 7. Push to GitHub (first time)
+git push -u origin main
+
+# Subsequent pushes
+git push
+
+# Update git remote 
+git remote set-url origin https://github.com/SwapnilMallick/RRT-ROBOSUITE
+
