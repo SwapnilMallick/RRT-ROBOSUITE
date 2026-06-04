@@ -67,7 +67,7 @@ except ImportError:
 @dataclass
 class RRTConfig:
     step_size: float = 0.1        # rad, max joint change per extension step
-    goal_threshold: float = 0.02  # m, EEF distance to declare goal reached
+    goal_threshold: float = 0.01  # m, EEF distance to declare goal reached
     goal_bias: float = 0.15       # fraction of iters biased toward IK seed
     max_iters: int = 5000
     seed: int = 0
@@ -973,7 +973,7 @@ def parse_args() -> argparse.Namespace:
     # --- RRT parameters ---
     p.add_argument("--step_size",      type=float, default=0.1,
                    help="Max joint change per RRT step (rad)")
-    p.add_argument("--goal_threshold", type=float, default=0.03,
+    p.add_argument("--goal_threshold", type=float, default=0.01,
                    help="EEF dist to goal for success (m)")
     p.add_argument("--goal_bias",      type=float, default=0.15,
                    help="Fraction of iters biased toward IK goal seed")
