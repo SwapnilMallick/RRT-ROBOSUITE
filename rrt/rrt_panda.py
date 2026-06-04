@@ -13,7 +13,18 @@ import copy
 import random
 import time
 from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
 from typing import Optional
+
+# Output directories, resolved relative to this script's location
+_SCRIPT_DIR = Path(__file__).parent
+_DIR_TREES  = _SCRIPT_DIR / "trees"
+_DIR_VIDEOS = _SCRIPT_DIR / "videos"
+_DIR_PLANS  = _SCRIPT_DIR / "plans"
+
+for _d in (_DIR_TREES, _DIR_VIDEOS, _DIR_PLANS):
+    _d.mkdir(parents=True, exist_ok=True)
 
 import mujoco
 import numpy as np
@@ -21,11 +32,19 @@ import robosuite as suite
 from robosuite import load_part_controller_config
 
 try:
+    import matplotlib
+    matplotlib.use("Agg")   # non-interactive backend; safe outside the main thread
     import matplotlib.pyplot as plt
     from mpl_toolkits.mplot3d.art3d import Line3DCollection
     HAS_MPL = True
 except ImportError:
     HAS_MPL = False
+
+try:
+    import cv2
+    HAS_CV2 = True
+except ImportError:
+    HAS_CV2 = False
 
 
 # ---------------------------------------------------------------------------
@@ -35,7 +54,7 @@ except ImportError:
 @dataclass
 class RRTConfig:
     step_size: float = 0.1        # rad, max joint change per extension step
-    goal_threshold: float = 0.03  # m, EEF distance to declare goal reached
+    goal_threshold: float = 0.02  # m, EEF distance to declare goal reached
     goal_bias: float = 0.15       # fraction of iters biased toward IK seed
     max_iters: int = 5000
     seed: int = 0
@@ -67,7 +86,7 @@ def make_env(render: bool = False) -> suite.environments.base.MujocoEnv:
     jp_cfg["input_type"] = "absolute"
     jp_cfg["output_max"] = 5.0   # large enough to cover full joint range
     jp_cfg["output_min"] = -5.0
-    jp_cfg["kp"] = 200            # stiffer tracking
+    jp_cfg["kp"] = 50            # moderate gain — visible motion in viewer
     jp_cfg["gripper"] = {"type": "GRIP"}
     cfg["body_parts"]["right"] = jp_cfg
 
@@ -76,7 +95,7 @@ def make_env(render: bool = False) -> suite.environments.base.MujocoEnv:
         robots="Panda",
         controller_configs=cfg,
         has_renderer=render,
-        has_offscreen_renderer=False,
+        has_offscreen_renderer=True,   # always on: needed for video recording
         use_camera_obs=False,
         reward_shaping=False,
         horizon=20000,
@@ -357,41 +376,162 @@ def rrt(
 
 
 # ---------------------------------------------------------------------------
+# Video recording helpers
+# ---------------------------------------------------------------------------
+
+# Video frame dimensions
+_VID_H, _VID_W = 480, 640
+_CAM = "frontview"
+
+
+def _capture_frame(
+    env,
+    elapsed: float,
+    label: str,
+    joint_err: float,
+    eef_dist: float,
+) -> np.ndarray:
+    """
+    Grab one offscreen frame, flip it right-side-up, convert to BGR,
+    and burn in the HUD overlay.  Returns an (H, W, 3) uint8 BGR array.
+    """
+    rgb = env.sim.render(height=_VID_H, width=_VID_W, camera_name=_CAM)
+    bgr = cv2.cvtColor(rgb[::-1], cv2.COLOR_RGB2BGR)   # flip + convert
+
+    # Semi-transparent dark banner at the top
+    overlay = bgr.copy()
+    cv2.rectangle(overlay, (0, 0), (_VID_W, 60), (0, 0, 0), -1)
+    cv2.addWeighted(overlay, 0.55, bgr, 0.45, 0, bgr)
+
+    font   = cv2.FONT_HERSHEY_SIMPLEX
+    white  = (255, 255, 255)
+    yellow = (0, 220, 255)
+
+    cv2.putText(bgr, f"t = {elapsed:6.2f} s", (10, 20),  font, 0.55, white,  1)
+    cv2.putText(bgr, label,                    (10, 40),  font, 0.55, yellow, 1)
+    cv2.putText(bgr, f"joint err: {joint_err:.3f} rad  EEF dist: {eef_dist:.3f} m",
+                (220, 40), font, 0.50, white, 1)
+
+    # Bottom-right datetime stamp
+    ts = datetime.now().strftime("%Y-%m-%d  %H:%M:%S")
+    cv2.putText(bgr, ts, (_VID_W - 210, _VID_H - 8), font, 0.42, (180, 180, 180), 1)
+
+    return bgr
+
+
+def save_video(frames: list[np.ndarray], out_path: str, fps: int) -> None:
+    """
+    Write BGR frames to an MP4 using H.264 (avc1) for broad player compatibility.
+    Falls back to mp4v if avc1 is unavailable on the current platform.
+    """
+    if not frames:
+        print("No frames to save.")
+        return
+
+    # Prefer H.264 — natively supported by QuickTime, browsers, and VLC
+    for fourcc_str in ("avc1", "mp4v"):
+        fourcc = cv2.VideoWriter_fourcc(*fourcc_str)
+        writer = cv2.VideoWriter(out_path, fourcc, fps, (_VID_W, _VID_H))
+        if writer.isOpened():
+            break
+        writer.release()
+    else:
+        print("Could not open a VideoWriter — skipping video save.")
+        return
+
+    for f in frames:
+        writer.write(f)
+    writer.release()
+
+    import os
+    size_mb = os.path.getsize(out_path) / 1_048_576
+    print(f"Video saved to {out_path}  "
+          f"({len(frames)} frames @ {fps} fps, "
+          f"{len(frames)/fps:.1f} s, {size_mb:.1f} MB)")
+
+
+# ---------------------------------------------------------------------------
 # Path execution
 # ---------------------------------------------------------------------------
+
+def _hold_frames(
+    env,
+    steps: int,
+    elapsed_start: float,
+    label: str,
+    eef_sid: int,
+    target_pos: np.ndarray,
+    render: bool,
+    frames: list[np.ndarray],
+) -> float:
+    """Step without moving the arm; collect frames and return updated elapsed."""
+    action = np.zeros(env.action_dim)
+    action[:7] = env.sim.data.qpos[:7].copy()
+    t0 = time.perf_counter()
+    for _ in range(steps):
+        env.step(action)
+        if render:
+            env.render()
+        eef = env.sim.data.site_xpos[eef_sid].copy()
+        dist = float(np.linalg.norm(eef - target_pos))
+        elapsed = elapsed_start + time.perf_counter() - t0
+        frames.append(_capture_frame(env, elapsed, label, 0.0, dist))
+    return elapsed_start + time.perf_counter() - t0
+
 
 def execute_path(
     env,
     path: list[np.ndarray],
     arm_idx: np.ndarray,
     eef_sid: int,
+    target_pos: np.ndarray,
     cfg: RRTConfig,
     render: bool,
+    frames: list[np.ndarray],
 ) -> np.ndarray:
     """
     Execute planned path via absolute JOINT_POSITION controller.
-    Sends q_target as the absolute joint goal each step.
+    Captures every step into `frames` for video export.
     action_dim=8: first 7 = arm joints, last 1 = gripper (0 = closed).
     """
     print(f"\nExecuting {len(path)} waypoints...")
     action_dim = env.action_dim
     n = len(arm_idx)
+    n_wp = len(path)
+    t0 = time.perf_counter()
+
+    # 1 s hold at start so the viewer has time to open
+    if render:
+        print("  [viewer] holding at start pose for 1 s...")
+    elapsed = _hold_frames(env, 20, 0.0, "Stabilised at q_start",
+                           eef_sid, target_pos, render, frames)
 
     for wi, q_target in enumerate(path):
+        label = f"WP {wi+1}/{n_wp}"
         for _ in range(cfg.exec_max_steps):
             q_curr = env.sim.data.qpos[arm_idx].copy()
-            err = np.linalg.norm(q_curr - q_target)
+            err = float(np.linalg.norm(q_curr - q_target))
             if err < cfg.exec_tol:
                 break
             action = np.zeros(action_dim)
-            action[:n] = q_target    # absolute goal joint angles
+            action[:n] = q_target
             env.step(action)
             if render:
                 env.render()
+            eef = env.sim.data.site_xpos[eef_sid].copy()
+            dist = float(np.linalg.norm(eef - target_pos))
+            elapsed = time.perf_counter() - t0
+            frames.append(_capture_frame(env, elapsed, label, err, dist))
 
         q_curr = env.sim.data.qpos[arm_idx].copy()
         err_final = float(np.linalg.norm(q_curr - q_target))
-        print(f"  wp {wi+1:3d}/{len(path)}: joint_err={err_final:.4f} rad")
+        print(f"  wp {wi+1:3d}/{n_wp}: joint_err={err_final:.4f} rad")
+
+    # 3 s hold at final pose
+    if render:
+        print("  [viewer] holding at final pose for 3 s...")
+    elapsed = _hold_frames(env, 60, elapsed, "Goal reached — final pose",
+                           eef_sid, target_pos, render, frames)
 
     return env.sim.data.site_xpos[eef_sid].copy()
 
@@ -467,7 +607,27 @@ def visualize(
     ax.set_xlabel("X (m)")
     ax.set_ylabel("Y (m)")
     ax.set_zlabel("Z (m)")
-    ax.set_title(f"RRT Tree in Task Space  |  {len(tree)} nodes")
+
+    # --- Axis limits: focus on the path region, not the full random-sample extent ---
+    # Use the solution path bounds if available, otherwise fall back to node bounds.
+    focus_pts = pp if (path is not None and len(path) > 1) else node_pos
+    margin = 0.25   # m padding around the path on each side
+    ax.set_xlim(focus_pts[:, 0].min() - margin, focus_pts[:, 0].max() + margin)
+    ax.set_ylim(focus_pts[:, 1].min() - margin, focus_pts[:, 1].max() + margin)
+    ax.set_zlim(focus_pts[:, 2].min() - margin, focus_pts[:, 2].max() + margin)
+
+    # Equal physical scaling: each metre of data occupies the same number of pixels
+    x_span = (focus_pts[:, 0].max() - focus_pts[:, 0].min()) + 2 * margin
+    y_span = (focus_pts[:, 1].max() - focus_pts[:, 1].min()) + 2 * margin
+    z_span = (focus_pts[:, 2].max() - focus_pts[:, 2].min()) + 2 * margin
+    ax.set_box_aspect([x_span, y_span, z_span])
+
+    # Viewing angle: elev lifts the eye so Z is clearly the vertical axis;
+    # azim rotates in the XY plane for the best diagonal view of the path.
+    ax.view_init(elev=25, azim=45)
+
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    ax.set_title(f"RRT Tree in Task Space  |  {len(tree)} nodes  |  {ts}")
     ax.legend(loc="upper left")
     plt.tight_layout()
     plt.savefig(out_path, dpi=150)
@@ -505,15 +665,41 @@ def parse_args() -> argparse.Namespace:
                    help="Show matplotlib tree plot interactively")
     p.add_argument("--no_exec",        action="store_true",
                    help="Skip path execution (plan only)")
-    p.add_argument("--out_plan",       type=str,   default="plan.npz",
+    p.add_argument("--out_plan",       type=str,
+                   default=str(_DIR_PLANS  / "plan.npz"),
                    help="Output path for planned qpos array")
-    p.add_argument("--out_tree",       type=str,   default="tree.png",
-                   help="Output path for tree visualization")
+    p.add_argument("--out_tree",       type=str,
+                   default=str(_DIR_TREES  / "tree.png"),
+                   help="Output path for tree visualization image")
+    p.add_argument("--out_video",      type=str,
+                   default=str(_DIR_VIDEOS / "execution.mp4"),
+                   help="Output path for execution video")
+    p.add_argument("--video_fps",      type=int,   default=20,
+                   help="Frames per second for the output video")
+    p.add_argument("--cam",            type=str,   default="frontview",
+                   help="Camera name for offscreen rendering (frontview/agentview/sideview)")
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+
+    # Timestamp used in all output filenames for this run
+    run_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # Inject timestamp before the extension, preserving the directory prefix.
+    # e.g. rrt/trees/tree.png → rrt/trees/tree_20240603_143022.png
+    def _stamp(path: str) -> str:
+        p = Path(path)
+        return str(p.with_stem(f"{p.stem}_{run_ts}"))
+
+    out_tree  = _stamp(args.out_tree)
+    out_video = _stamp(args.out_video)
+    out_plan  = _stamp(args.out_plan)
+
+    # Override global camera name from CLI
+    global _CAM
+    _CAM = args.cam
 
     cfg = RRTConfig(
         step_size=args.step_size,
@@ -584,7 +770,7 @@ def main() -> None:
     )
     plan_time = time.perf_counter() - t_plan
 
-    # --- Visualize ---
+    # --- Visualize tree (saves timestamped PNG) ---
     visualize(
         tree=tree,
         path=path,
@@ -594,32 +780,47 @@ def main() -> None:
         eef_sid=eef_sid,
         env=env,
         show=args.show,
-        out_path=args.out_tree,
+        out_path=out_tree,
     )
 
     # --- Save plan ---
     if path is not None:
-        np.savez(args.out_plan, qpos=np.array(path))
-        print(f"Plan saved to {args.out_plan} ({len(path)} waypoints)")
+        np.savez(out_plan, qpos=np.array(path))
+        print(f"Plan saved to {out_plan} ({len(path)} waypoints)")
 
-    # --- Execute ---
+    # --- Execute + record video ---
     exec_success = False
     eef_final = None
     dist_final = None
     if path is not None and not args.no_exec:
-        # Reset env and restore to planned start config before executing
         env.reset()
-        env.sim.data.qpos[arm_idx] = q_start
-        env.sim.data.qvel[:] = 0.0
-        mujoco.mj_forward(env.sim.model._model, env.sim.data._data)
+        frames: list[np.ndarray] = []
+
+        # Drive arm to q_start via the controller (recorded into frames)
+        print("Stabilising at q_start before execution...")
+        action_init = np.zeros(env.action_dim)
+        action_init[:7] = q_start
+        t_stab = time.perf_counter()
+        for _ in range(150):
+            env.step(action_init)
+            if args.render:
+                env.render()
+            eef = env.sim.data.site_xpos[eef_sid].copy()
+            dist = float(np.linalg.norm(eef - target_pos))
+            elapsed = time.perf_counter() - t_stab
+            q_curr = env.sim.data.qpos[arm_idx].copy()
+            err = float(np.linalg.norm(q_curr - q_start))
+            frames.append(_capture_frame(env, elapsed, "Stabilising at q_start", err, dist))
 
         eef_final = execute_path(
             env=env,
             path=path,
             arm_idx=arm_idx,
             eef_sid=eef_sid,
+            target_pos=target_pos,
             cfg=cfg,
             render=args.render,
+            frames=frames,
         )
         dist_final = float(np.linalg.norm(eef_final - target_pos))
         exec_success = dist_final < cfg.goal_threshold * 2.0
@@ -627,19 +828,29 @@ def main() -> None:
         print(f"Distance to goal:   {dist_final:.4f} m")
         print(f"Execution success:  {exec_success}")
 
+        if HAS_CV2:
+            save_video(frames, out_video, args.video_fps)
+        else:
+            print("cv2 not available — skipping video save.")
+
     # --- Summary ---
     print("\n" + "=" * 60)
     print("SUMMARY")
     print("=" * 60)
+    print(f"  Run timestamp:     {run_ts}")
     print(f"  Iterations used:   {iters_used} / {cfg.max_iters}")
     print(f"  Tree size:         {len(tree)} nodes")
     print(f"  Path found:        {path is not None}")
     print(f"  Path length:       {len(path) if path else 'N/A'} waypoints")
     print(f"  Plan time:         {plan_time:.2f} s")
+    print(f"  Tree image:        {out_tree}")
+    if path is not None:
+        print(f"  Plan file:         {out_plan}")
     if path is not None and not args.no_exec:
         print(f"  Exec success:      {exec_success}")
         if dist_final is not None:
             print(f"  Final EEF dist:    {dist_final:.4f} m")
+        print(f"  Video:             {out_video}")
     print("=" * 60)
 
     env.close()
