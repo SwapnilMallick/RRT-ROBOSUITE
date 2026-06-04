@@ -44,4 +44,24 @@ git push
 git remote set-url origin https://github.com/SwapnilMallick/RRT-ROBOSUITE
 
 
+# rrt_panda_smooth.py:
+
+
+# Plan and smooth only, no execution
+python rrt_smooth/rrt_panda_smooth.py --no_exec
+
+# With MuJoCo viewer + per-joint comparison plot
+python rrt_smooth/rrt_panda_smooth.py --render --plot_per_joint
+
+# Ablation: bspline only (no shortcutting)
+python rrt_smooth/rrt_panda_smooth.py --smoother bspline_only --no_exec
+
+# Execute both original and smoothed for side-by-side comparison
+python rrt_smooth/rrt_panda_smooth.py --execute both
+
+# Tune smoothing — approximating spline, more samples
+python rrt_smooth/rrt_panda_smooth.py --spline_s 0.01 --n_samples 150 --n_shortcut 300
+
+# Faster planning with looser goal threshold
+python rrt_smooth/rrt_panda_smooth.py --goal_threshold 0.05 --max_iters 3000
 
