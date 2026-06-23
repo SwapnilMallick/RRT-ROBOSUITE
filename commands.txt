@@ -65,3 +65,17 @@ python rrt_smooth/rrt_panda_smooth.py --spline_s 0.01 --n_samples 150 --n_shortc
 # Faster planning with looser goal threshold
 python rrt_smooth/rrt_panda_smooth.py --goal_threshold 0.05 --max_iters 3000
 
+python3 ./rrt_latent_space/train_betavae.py \
+  --data ./rrt_latent_space/vae_images.hdf5 \
+  --key agentview_image \
+  --latent 32 --beta 1.0 --anneal 10 --alpha 0.85 \
+  --epochs 100 --batch 128 --lr 1e-3 --workers 4 \
+  --ckpt_dir ./ckpt
+
+python3 ./rrt_latent_space/recon_check.py \
+  --ckpt ./rrt_latent_space/ckpt/betavae_last.pt \
+  --hdf5 ./datasets/lift/ph/image.hdf5 \
+  --key agentview_image \
+  --filter_key valid \
+  --n 8 \
+  --out ./rrt_latent_space/recon_check.png

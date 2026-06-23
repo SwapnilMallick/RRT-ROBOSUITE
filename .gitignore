@@ -2,3 +2,12 @@ __pycache__/
 *.pyc
 *.pyo
 .DS_Store
+
+CLAUDE.md
+
+/rrt_latent_space/ckpt/
+/rrt_latent_space/samples/
+recon_check.png
+recon_check_kl.png
+/datasets/
+vae_images.hdf5
