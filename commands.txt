@@ -79,3 +79,16 @@ python3 ./rrt_latent_space/recon_check.py \
   --filter_key valid \
   --n 8 \
   --out ./rrt_latent_space/recon_check.png
+
+
+PYTHONUNBUFFERED=1 \
+DATASET_DIR=/Users/swapnilmallick/Desktop/ROBOSUITE_RRT/datasets/lift/ph \
+python -u floor_control_plan.py --env lift --frameskip 5 --num_hist 3 \
+    --horizon 5 --action_dim 35 --proprio_dim 9 \
+    --num_samples 100 --opt_steps 30 --n_evals 5
+
+
+PYTHONUNBUFFERED=1 \
+DATASET_DIR=/Users/swapnilmallick/Desktop/ROBOSUITE_RRT/datasets/lift/ph \
+python -u train_decoder.py --epochs 100 --batch 256 --lr 3e-4 \
+    --ckpt_dir results/decoder_ckpt
