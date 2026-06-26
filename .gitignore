@@ -11,3 +11,8 @@ recon_check.png
 recon_check_kl.png
 /datasets/
 vae_images.hdf5
+/rrt_enc/reference_trajectory/
+/rrt_enc/reference_frames/
+/rrt_enc/encoder_reliability_all.png
+/rrt_enc/encoder_reliability_cls.png
+/rrt_enc/encoder_reliability_dino_mean.png
