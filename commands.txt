@@ -92,3 +92,10 @@ PYTHONUNBUFFERED=1 \
 DATASET_DIR=/Users/swapnilmallick/Desktop/ROBOSUITE_RRT/datasets/lift/ph \
 python -u train_decoder.py --epochs 100 --batch 256 --lr 3e-4 \
     --ckpt_dir results/decoder_ckpt
+
+
+python3 encoder_reliability_probe.py \
+  --hdf5 /Users/swapnilmallick/Desktop/ROBOSUITE_RRT/datasets/lift/ph/image224.hdf5 \
+  --demos demo_0 demo_5 demo_12 demo_30 demo_77 \
+  --encoders openclip dinov2 ijepa \
+  --out encoder_reliability_all.png

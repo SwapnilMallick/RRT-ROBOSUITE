@@ -16,3 +16,8 @@ vae_images.hdf5
 /rrt_enc/encoder_reliability_all.png
 /rrt_enc/encoder_reliability_cls.png
 /rrt_enc/encoder_reliability_dino_mean.png
+/images/
+/beta_0.005/
+/ckpt/
+encoder_reliability_20260626_223701.png
+encoder_reliability_20260626_223831.png

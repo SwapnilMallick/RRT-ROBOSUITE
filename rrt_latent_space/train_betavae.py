@@ -24,7 +24,9 @@ Exposes encode(x)->z (mean) and decode(z)->x_hat for the interpolation harness.
 import os
 import math
 import argparse
+from datetime import datetime
 import numpy as np
+import matplotlib.pyplot as plt
 import h5py
 import torch
 import torch.nn as nn
@@ -165,6 +167,24 @@ def beta_at(epoch, beta_max, anneal_epochs):
     return beta_max * min(1.0, (epoch + 1) / max(1, anneal_epochs))
 
 
+def save_recon_grid(x, x_hat, beta, epoch, img_dir):
+    os.makedirs(img_dir, exist_ok=True)
+    n = min(8, x.shape[0])
+    x_np  = x[:n].cpu().detach().permute(0, 2, 3, 1).numpy()
+    xh_np = x_hat[:n].cpu().detach().permute(0, 2, 3, 1).numpy()
+    fig, axes = plt.subplots(2, n, figsize=(n * 1.5, 3.5))
+    fig.suptitle(f"Beta-VAE  |  beta={beta:.4f}  |  epoch={epoch:03d}", fontsize=10)
+    for i in range(n):
+        axes[0, i].imshow(np.clip(x_np[i],  0, 1)); axes[0, i].axis("off")
+        axes[1, i].imshow(np.clip(xh_np[i], 0, 1)); axes[1, i].axis("off")
+    axes[0, 0].set_title("orig",  fontsize=7)
+    axes[1, 0].set_title("recon", fontsize=7)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    plt.tight_layout()
+    plt.savefig(os.path.join(img_dir, f"recon_ep{epoch:03d}_{ts}.png"), dpi=100)
+    plt.close(fig)
+
+
 def train(cfg):
     dev = torch.device("cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu")
     ds = H5Images(cfg["data"], key=cfg["key"])
@@ -175,7 +195,15 @@ def train(cfg):
     opt = torch.optim.Adam(model.parameters(), lr=cfg["lr"])
     os.makedirs(cfg["ckpt_dir"], exist_ok=True)
 
-    log_path = os.path.join(cfg["ckpt_dir"], "train_log.txt")
+    beta_tag = f"beta_{cfg['beta']}"
+    run_ts  = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # per-beta image subdirectory
+    base_dir = os.path.dirname(os.path.abspath(cfg["ckpt_dir"]))
+    img_dir = cfg.get("img_dir") or os.path.join(base_dir, "images", beta_tag)
+
+    # timestamped log file so runs never overwrite each other
+    log_path = os.path.join(cfg["ckpt_dir"], f"train_log_{beta_tag}_{run_ts}.txt")
     log_file = open(log_path, "a")
 
     def log(msg):
@@ -187,10 +215,14 @@ def train(cfg):
               f"beta->{cfg['beta']} over {cfg['anneal']} ep | alpha {cfg['alpha']}")
     log(header)
 
+    best_loss = float("inf")
+    best_ckpt = os.path.join(cfg["ckpt_dir"], f"betavae_{cfg['beta']}.pt")
+
     for ep in range(cfg["epochs"]):
         model.train()
         beta = beta_at(ep, cfg["beta"], cfg["anneal"])
         agg = {"loss": 0, "dssim": 0, "l1": 0, "kl": 0, "nb": 0}
+        last_x = last_xhat = None
         for x in dl:
             x = x.to(dev)
             x_hat, mu, logvar = model(x)
@@ -201,14 +233,31 @@ def train(cfg):
             for k, v in (("loss", loss.item()), ("dssim", dssim), ("l1", l1),
                          ("kl", kl.item()), ("nb", 1)):
                 agg[k] += v
+            last_x, last_xhat = x, x_hat
         nb = max(1, agg["nb"])
-        log(f"ep {ep:03d} | beta {beta:.3f} | loss {agg['loss']/nb:.4f} | "
+        ep_loss = agg["loss"] / nb
+        log(f"ep {ep:03d} | beta {beta:.3f} | loss {ep_loss:.4f} | "
             f"1-msssim {agg['dssim']/nb:.4f} | L1 {agg['l1']/nb:.4f} | "
             f"KL/dim {agg['kl']/nb:.4f}")
+
+        # rolling last checkpoint
         torch.save({"model": model.state_dict(), "cfg": cfg, "epoch": ep},
                    os.path.join(cfg["ckpt_dir"], "betavae_last.pt"))
 
-    log("done. checkpoint: " + os.path.join(cfg["ckpt_dir"], "betavae_last.pt"))
+        # best checkpoint per beta — never overwritten by a different beta run
+        if ep_loss < best_loss:
+            best_loss = ep_loss
+            torch.save({"model": model.state_dict(), "cfg": cfg,
+                        "epoch": ep, "loss": best_loss}, best_ckpt)
+            log(f"  -> new best ({best_loss:.4f}), saved {best_ckpt}")
+
+        if last_x is not None:
+            model.eval()
+            with torch.no_grad():
+                save_recon_grid(last_x, last_xhat, beta, ep, img_dir)
+            model.train()
+
+    log(f"done. best={best_loss:.4f} @ {best_ckpt}")
     log_file.close()
 
 
@@ -225,6 +274,8 @@ if __name__ == "__main__":
     p.add_argument("--batch", type=int, default=128)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--workers", type=int, default=4)
+    p.add_argument("--img_dir", default=None,
+                   help="where to save recon grids (default: <ckpt_dir>/../images/)")
     p.add_argument("--smoke_test", action="store_true",
                    help="run a forward+backward pass on synthetic data and exit")
     a = p.parse_args()

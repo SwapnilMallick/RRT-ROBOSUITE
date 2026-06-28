@@ -27,7 +27,9 @@ a --synthetic mode verifies the analysis/plotting without weights.
 """
 
 import argparse
+import os
 import warnings
+from datetime import datetime
 import numpy as np
 import h5py
 import torch
@@ -196,8 +198,13 @@ def run(cfg):
         ax.legend(fontsize=7); ax.grid(alpha=0.3)
     fig.suptitle("Encoder reliability: cosine-sim to goal vs distance "
                  "(goal on right; monotone rise = reliable)", fontsize=12)
-    fig.tight_layout(); fig.savefig(cfg["out"], dpi=130)
-    print(f"\nsaved {cfg['out']}")
+    fig.tight_layout()
+    plots_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "plots")
+    os.makedirs(plots_dir, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_path = os.path.join(plots_dir, f"encoder_reliability_{ts}.png")
+    fig.savefig(out_path, dpi=130)
+    print(f"\nsaved {out_path}")
 
 
 # --------------------------------------------------------------------------- #
@@ -234,7 +241,7 @@ def build_encoders(cfg, device):
 
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
-    p.add_argument("--hdf5", default="/path/to/image224.hdf5")
+    p.add_argument("--hdf5", default="/Users/swapnilmallick/Desktop/ROBOSUITE_RRT/datasets/lift/ph/image224.hdf5")
     p.add_argument("--demos", nargs="+", default=["demo_0", "demo_1", "demo_2"])
     p.add_argument("--image_key", default="agentview_image")
     p.add_argument("--encoders", nargs="+", default=["openclip", "dinov2", "ijepa"])
