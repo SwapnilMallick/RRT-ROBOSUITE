@@ -21,3 +21,4 @@ vae_images.hdf5
 /ckpt/
 encoder_reliability_20260626_223701.png
 encoder_reliability_20260626_223831.png
+/rrt_latent_space/images/

@@ -99,3 +99,12 @@ python3 encoder_reliability_probe.py \
   --demos demo_0 demo_5 demo_12 demo_30 demo_77 \
   --encoders openclip dinov2 ijepa \
   --out encoder_reliability_all.png
+
+
+python3 rrt_latent_space/train_betavae_lpips.py \
+  --data rrt_latent_space/vae_images.hdf5 \
+  --key agentview_image \
+  --latent 32 --beta 0.005 --anneal 10 --alpha 0.85 \
+  --lpips_net alex \
+  --epochs 100 --batch 128 --lr 1e-3
+  --ckpt_dir ./ckpt
