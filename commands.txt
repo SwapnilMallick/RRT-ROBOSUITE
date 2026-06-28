@@ -108,3 +108,7 @@ python3 rrt_latent_space/train_betavae_lpips.py \
   --lpips_net alex \
   --epochs 100 --batch 128 --lr 1e-3
   --ckpt_dir ./ckpt
+
+  python3 rrt_latent_space/train_betavae_l1_lpips.py \
+  --data rrt_latent_space/vae_images.hdf5 \
+  --lambda_lpips 0.1 --beta 1.0 --anneal 10 --epochs 100
