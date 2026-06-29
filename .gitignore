@@ -16,9 +16,12 @@ vae_images.hdf5
 /rrt_enc/encoder_reliability_all.png
 /rrt_enc/encoder_reliability_cls.png
 /rrt_enc/encoder_reliability_dino_mean.png
+/rrt_enc/plots_v2/
 /images/
 /beta_0.005/
 /ckpt/
 encoder_reliability_20260626_223701.png
 encoder_reliability_20260626_223831.png
 /rrt_latent_space/images/
+mae_pretrain_vit_base.pth
+ibot_vitb16.pth
