@@ -231,7 +231,7 @@ def save_recon_grid(x, x_hat, beta, epoch, img_dir):
     x_np  = x[:n].cpu().detach().permute(0, 2, 3, 1).numpy()
     xh_np = x_hat[:n].cpu().detach().permute(0, 2, 3, 1).numpy()
     fig, axes = plt.subplots(2, n, figsize=(n * 1.5, 3.5))
-    fig.suptitle(f"Beta-VAE  |  beta={beta:.4f}  |  epoch={epoch:03d}", fontsize=10)
+    fig.suptitle(f"Sigma-VAE  |  beta={beta:.4f}  |  epoch={epoch:03d}", fontsize=10)
     for i in range(n):
         axes[0, i].imshow(np.clip(x_np[i],  0, 1)); axes[0, i].axis("off")
         axes[1, i].imshow(np.clip(xh_np[i], 0, 1)); axes[1, i].axis("off")
@@ -258,7 +258,7 @@ def train(cfg):
 
     # per-beta image subdirectory
     base_dir = os.path.dirname(os.path.abspath(cfg["ckpt_dir"]))
-    img_dir = cfg.get("img_dir") or os.path.join(base_dir, "images", beta_tag)
+    img_dir = cfg.get("img_dir") or os.path.join(base_dir, "images", f"{beta_tag}_{cfg['decoder_dist']}_free_bits_{cfg['free_bits']}")
 
     # timestamped log file so runs never overwrite each other
     log_path = os.path.join(cfg["ckpt_dir"], f"train_log_{beta_tag}_{run_ts}.txt")
@@ -275,7 +275,7 @@ def train(cfg):
     log(header)
 
     best_loss = float("inf")
-    best_ckpt = os.path.join(cfg["ckpt_dir"], f"betavae_{cfg['beta']}.pt")
+    best_ckpt = os.path.join(cfg["ckpt_dir"], f"sigmavae_free_bits_{cfg['free_bits']}_{cfg['decoder_dist']}.pt")
 
     for ep in range(cfg["epochs"]):
         model.train()

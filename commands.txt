@@ -119,3 +119,38 @@ python3 rrt_latent_space/train_betavae_lpips.py \
       --ckpt_dir ./rrt_latent_space/ckpt \
       --decoder_dist gaussian --free_bits 0.5 \
       --beta 1.0 --anneal 10 --epochs 100 --batch 128 --latent 32 --lr 1e-3
+
+
+python3 ./rrt_enc/encoder_reliability_probe_v3.py \
+  --hdf5 ./datasets/lift/ph/image224.hdf5 \
+  --hdf5_side ./datasets/lift/ph/image224_sideview.hdf5 \
+  --demos demo_0 demo_5 demo_12 demo_30 demo_77 \
+  --encoders openclip dinov2 ijepa siglip \
+  --out ./rrt_enc/plots_v3/enc_3way_1.png
+
+# mean pooling
+python3 ./rrt_enc/encoder_reliability_probe_v3.py \
+  --hdf5 ./datasets/lift/ph/image224.hdf5 \
+  --hdf5_side ./datasets/lift/ph/image224_sideview.hdf5 \
+  --demos demo_0 demo_5 demo_12 demo_30 demo_77 \
+  --encoders ibot mae --vit_pool mean \
+  --ibot_ckpt ./rrt_enc/ibot_vitb16.pth \
+  --mae_ckpt ./rrt_enc/mae_pretrain_vit_base.pth \
+  --out ./rrt_enc/plots_v3/enc_3way_2_mean.png
+
+# cls pooling
+python3 ./rrt_enc/encoder_reliability_probe_v3.py \
+  --hdf5 ./datasets/lift/ph/image224.hdf5 \
+  --hdf5_side ./datasets/lift/ph/image224_sideview.hdf5 \
+  --demos demo_0 demo_5 demo_12 demo_30 demo_77 \
+  --encoders ibot mae --vit_pool cls \
+  --ibot_ckpt ./rrt_enc/ibot_vitb16.pth \
+  --mae_ckpt ./rrt_enc/mae_pretrain_vit_base.pth \
+  --out ./rrt_enc/plots_v3/enc_3way_2_cls.png
+
+python3 ./rrt_enc/encoder_reliability_probe_v3.py \
+  --hdf5 ./datasets/lift/ph/image224.hdf5 \
+  --hdf5_side ./datasets/lift/ph/image224_sideview.hdf5 \
+  --demos demo_0 demo_5 demo_12 demo_30 demo_77 \
+  --encoders r3m vc1 \
+  --out ./rrt_enc/plots_v3/enc_3way_3.png
