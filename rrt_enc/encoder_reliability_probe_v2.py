@@ -27,7 +27,6 @@ a --synthetic mode verifies the analysis/plotting without weights.
 """
 
 import argparse
-import os
 import warnings
 import numpy as np
 import h5py
@@ -169,10 +168,7 @@ class SigLIPEncoder:
         from PIL import Image
         ims = [Image.fromarray(f) for f in frames_uint8]
         inp = self.proc(images=ims, return_tensors="pt").to(self.device)
-        z = self.model.get_image_features(**inp)
-        # transformers >=5.x may return BaseModelOutputWithPooling instead of tensor
-        if not isinstance(z, torch.Tensor):
-            z = z.pooler_output
+        z = self.model.get_image_features(**inp)               # pooled image embed
         return torch.nn.functional.normalize(z, dim=-1).cpu().numpy()
 
 
@@ -233,7 +229,17 @@ def cube_pos_from(obs_group, key, T):
     return arr[:, :3] if arr.ndim == 2 and arr.shape[1] >= 3 else arr.reshape(T, -1)[:, :3]
 
 
-def load_demo(path, demo, image_key="agentview_image"):
+def select_reach_index(dist, eps):
+    """First frame within eps of the cube (approach moment for a REACH task),
+    else closest-approach argmin with a warning. dist is per-frame gripper-cube
+    distance."""
+    below = np.where(dist < eps)[0]
+    if len(below) > 0:
+        return int(below[0]), False
+    return int(np.argmin(dist)), True     # (idx, fell_back)
+
+
+def load_demo(path, demo, image_key="agentview_image", goal_eps=None):
     with h5py.File(path, "r") as f:
         root = f["data"] if "data" in f else f
         g = root[demo]
@@ -249,43 +255,125 @@ def load_demo(path, demo, image_key="agentview_image"):
         else:
             dist = None
             axis_kind = "FRAME INDEX (no cube key found -> proxy axis)"
+    # REACH task: truncate at the first frame within goal_eps of the cube, so the
+    # goal (last frame after truncation) is the approach moment, not grasp/lift.
+    if dist is not None and goal_eps is not None:
+        ridx, fell = select_reach_index(dist, goal_eps)
+        if fell:
+            warnings.warn(f"{demo}: no frame within goal_eps={goal_eps}; using "
+                          f"closest approach at t={ridx} as reach goal.")
+        frames = frames[:ridx + 1]
+        dist = dist[:ridx + 1]
+        axis_kind += f" | truncated at reach t={ridx}"
     return frames, dist, axis_kind
 
 
+def load_demo_two_views(path_agent, path_side, demo,
+                        agent_key="agentview_image", side_key="sideview_image",
+                        goal_eps=None):
+    """Load agentview + sideview for one demo from TWO files, with alignment
+    verification (equal frame counts + identical robot0_eef_pos). Then, for the
+    REACH task, truncate BOTH views jointly at the first frame within goal_eps of
+    the cube so the goal (last frame) is the approach moment, not grasp/lift."""
+    with h5py.File(path_agent, "r") as f:
+        ra = f["data"] if "data" in f else f
+        oga = ra[demo]["obs"] if "obs" in ra[demo] else ra[demo]
+        fa = np.asarray(oga[agent_key][:])
+        eef_a = np.asarray(oga["robot0_eef_pos"][:], np.float64)
+        T = fa.shape[0]
+        ckey = find_cube_key(oga)
+        da = (np.linalg.norm(eef_a - cube_pos_from(oga, ckey, T), axis=1)
+              if ckey is not None else None)
+    with h5py.File(path_side, "r") as f:
+        rs = f["data"] if "data" in f else f
+        if demo not in rs:
+            raise KeyError(f"{demo} not in sideview file {path_side}")
+        og = rs[demo]["obs"] if "obs" in rs[demo] else rs[demo]
+        fs = np.asarray(og[side_key][:])
+        eef_s = np.asarray(og["robot0_eef_pos"][:], np.float64)
+    if fs.shape[0] != fa.shape[0]:
+        raise ValueError(f"{demo}: frame-count mismatch agent={fa.shape[0]} "
+                         f"side={fs.shape[0]} -- files are NOT aligned")
+    max_dev = float(np.abs(eef_a - eef_s).max())
+    if max_dev > 1e-4:
+        raise ValueError(f"{demo}: eef_pos differs across files (max {max_dev:.2e}) "
+                         "-- the two renders are NOT the same states; alignment failed")
+    if da is not None and goal_eps is not None:
+        ridx, fell = select_reach_index(da, goal_eps)
+        if fell:
+            warnings.warn(f"{demo}: no frame within goal_eps={goal_eps}; using "
+                          f"closest approach at t={ridx} as reach goal.")
+        fa, fs, da = fa[:ridx + 1], fs[:ridx + 1], da[:ridx + 1]
+    return fa, fs, da            # distance from the agentview file (identical if aligned)
+
+
 # --------------------------------------------------------------------------- #
-def analyze(frames, dist, encoder, frame_step=1):
-    idx = np.arange(0, len(frames), frame_step)
-    fr = frames[idx]
-    z = encoder.embed(list(fr))                                # (n, D), normalized
-    zg = z[-1:]                                                 # goal = last frame
-    sim = (z * zg).sum(-1)                                      # cosine sim to goal
+def _sim_to_goal(z):
+    zg = z[-1:]
+    return (z * zg).sum(-1)                                     # cosine sim to last
+
+
+def _score(sim, dist, idx):
     if dist is not None:
         x = dist[idx]
-        rho, _ = spearmanr(sim, -x)         # want sim up as distance down -> rho ~ +1
+        rho, _ = spearmanr(sim, -x)          # want sim up as distance down
         xlabel = "gripper-cube distance"
     else:
         x = idx.astype(float)
-        rho, _ = spearmanr(sim, x)          # sim up as frame index up
+        rho, _ = spearmanr(sim, x)
         xlabel = "frame index (proxy)"
-    return dict(x=x, sim=sim, rho=rho, xlabel=xlabel,
-                drange=float(sim.max() - sim.min()))
+    return x, float(rho), xlabel, float(sim.max() - sim.min())
+
+
+def analyze(frames, dist, encoder, frame_step=1):
+    """Single-view analysis (unchanged interface)."""
+    idx = np.arange(0, len(frames), frame_step)
+    z = encoder.embed(list(frames[idx]))                       # (n, D) normalized
+    sim = _sim_to_goal(z)
+    x, rho, xlabel, drange = _score(sim, dist, idx)
+    return dict(x=x, sim=sim, rho=rho, xlabel=xlabel, drange=drange)
+
+
+def analyze_three_way(fr_agent, fr_side, dist, encoder, frame_step=1):
+    """Return agent-only, side-only, and concatenated(both) configs. Each view is
+    embedded through the SAME encoder and L2-normalized; 'both' concatenates the
+    two per-view (already-normalized) embeddings and re-normalizes the result so
+    neither view dominates by norm."""
+    idx = np.arange(0, len(fr_agent), frame_step)
+    za = encoder.embed(list(fr_agent[idx]))                    # (n, Da) normalized
+    zs = encoder.embed(list(fr_side[idx]))                     # (n, Ds) normalized
+    zb = np.concatenate([za, zs], axis=1)
+    zb = zb / (np.linalg.norm(zb, axis=1, keepdims=True) + 1e-9)
+    out = {}
+    for tag, z in (("agent", za), ("side", zs), ("both", zb)):
+        sim = _sim_to_goal(z)
+        x, rho, xlabel, drange = _score(sim, dist, idx)
+        out[tag] = dict(x=x, sim=sim, rho=rho, xlabel=xlabel, drange=drange)
+    return out
 
 
 def run(cfg):
     device = get_device()
     print(f"device: {device}")
+    if cfg.get("goal_eps") is not None and cfg["goal_eps"] <= 0:
+        cfg["goal_eps"] = None            # disable reach-truncation
     encoders = build_encoders(cfg, device)
+    if cfg.get("hdf5_side"):
+        run_three_way(cfg, device, encoders)
+    else:
+        run_single_view(cfg, device, encoders)
 
+
+def run_single_view(cfg, device, encoders):
     fig, axes = plt.subplots(1, len(encoders), figsize=(5.2*len(encoders), 4.6),
                              squeeze=False)
     axes = axes[0]
     summary = {e.name: [] for e in encoders}
     for di, demo in enumerate(cfg["demos"]):
-        frames, dist, axis_kind = load_demo(cfg["hdf5"], demo, cfg["image_key"])
+        frames, dist, axis_kind = load_demo(cfg["hdf5"], demo, cfg["image_key"], cfg["goal_eps"])
         if dist is None and di == 0:
             warnings.warn("No cube-position key found; x-axis falls back to frame "
-                          "index (a proxy). Spearman is vs frame index, not true "
-                          "distance. Check obs keys with get_dataset_info --verbose.")
+                          "index (a proxy).")
         print(f"demo {demo}: {len(frames)} frames | x-axis = {axis_kind}")
         for ax, enc in zip(axes, encoders):
             r = analyze(frames, dist, enc, cfg["frame_step"])
@@ -295,7 +383,7 @@ def run(cfg):
             ax.set_xlabel(r["xlabel"]); ax.set_ylabel("cosine sim to goal frame")
             ax.set_title(enc.name)
             if dist is not None:
-                ax.invert_xaxis()    # distance shrinks toward goal -> goal on the right
+                ax.invert_xaxis()
 
     print("\n=== reliability summary (mean over demos) ===")
     bb = {e.name: getattr(e, "backbone", "?") for e in encoders}
@@ -309,8 +397,59 @@ def run(cfg):
         ax.legend(fontsize=7); ax.grid(alpha=0.3)
     fig.suptitle("Encoder reliability: cosine-sim to goal vs distance "
                  "(goal on right; monotone rise = reliable)", fontsize=12)
-    os.makedirs(os.path.dirname(os.path.abspath(cfg["out"])), exist_ok=True)
     fig.tight_layout(); fig.savefig(cfg["out"], dpi=130)
+    print(f"\nsaved {cfg['out']}")
+
+
+def run_three_way(cfg, device, encoders):
+    """agentview vs sideview vs both(concat) per encoder, from two aligned files."""
+    views = ["agent", "side", "both"]
+    colors = {"agent": "#1f77b4", "side": "#ff7f0e", "both": "#2ca02c"}
+    # one row per encoder, one column per view-config
+    fig, axes = plt.subplots(len(encoders), 3, squeeze=False,
+                             figsize=(15, 4.2*len(encoders)))
+    # summary[enc][view] = list of (rho, drange) over demos
+    summary = {e.name: {v: [] for v in views} for e in encoders}
+    for demo in cfg["demos"]:
+        fa, fs, dist = load_demo_two_views(
+            cfg["hdf5"], cfg["hdf5_side"], demo,
+            cfg["image_key"], cfg["side_key"], cfg["goal_eps"])
+        print(f"demo {demo}: {len(fa)} frames (agent+side aligned, reach-truncated)")
+        for ei, enc in enumerate(encoders):
+            res = analyze_three_way(fa, fs, dist, enc, cfg["frame_step"])
+            for vi, v in enumerate(views):
+                r = res[v]
+                summary[enc.name][v].append((r["rho"], r["drange"]))
+                ax = axes[ei][vi]
+                ax.plot(r["x"], r["sim"], marker="o", ms=3, lw=1, alpha=0.8,
+                        color=colors[v], label=f"{demo} (ρ={r['rho']:+.2f})")
+                ax.set_title(f"{enc.name} — {v}")
+                ax.set_xlabel(r["xlabel"]); ax.set_ylabel("cos sim to goal")
+                if dist is not None:
+                    ax.invert_xaxis()
+                ax.grid(alpha=0.3); ax.legend(fontsize=6)
+
+    print("\n=== three-way view comparison (mean over demos) ===")
+    bb = {e.name: getattr(e, "backbone", "?") for e in encoders}
+    for name in summary:
+        print(f"\n {name}  [{bb[name]}]")
+        stats = {}
+        for v in views:
+            rr = np.array([a for a, _ in summary[name][v]])
+            dd = np.array([b for _, b in summary[name][v]])
+            stats[v] = (rr.mean(), dd.mean())
+            print(f"   {v:6s} | Spearman {rr.mean():+.3f} | dyn-range {dd.mean():.3f}")
+        # does 'both' earn its double cost? compare near-goal DISCRIMINABILITY
+        best_single = max(stats["agent"][1], stats["side"][1])
+        gain = stats["both"][1] - best_single
+        verdict = ("BOTH HELPS (dyn-range beats best single view "
+                   f"by {gain:+.3f})" if gain > 0.01 else
+                   "both ~ best single view -> second view not worth double cost")
+        print(f"   -> {verdict}")
+    fig.suptitle("Three-way view comparison: agentview vs sideview vs both "
+                 "(goal on right; want monotone rise + wide near-goal spread)",
+                 fontsize=12)
+    fig.tight_layout(); fig.savefig(cfg["out"], dpi=120)
     print(f"\nsaved {cfg['out']}")
 
 
@@ -363,6 +502,9 @@ def build_encoders(cfg, device):
 if __name__ == "__main__":
     p = argparse.ArgumentParser()
     p.add_argument("--hdf5", default="/path/to/image224.hdf5")
+    p.add_argument("--hdf5_side", default=None,
+                   help="sideview file; if given, runs the 3-way agent/side/both comparison")
+    p.add_argument("--side_key", default="sideview_image")
     p.add_argument("--demos", nargs="+", default=["demo_0", "demo_1", "demo_2"])
     p.add_argument("--image_key", default="agentview_image")
     p.add_argument("--encoders", nargs="+",
@@ -374,7 +516,11 @@ if __name__ == "__main__":
     p.add_argument("--ibot_ckpt", default="ibot_vitb16.pth")
     p.add_argument("--mae_ckpt", default="mae_pretrain_vit_base.pth")
     p.add_argument("--frame_step", type=int, default=1)
-    p.add_argument("--out", default="./plots_v2/encoder_reliability.png")
+    p.add_argument("--goal_eps", type=float, default=0.03,
+                   help="REACH goal: truncate each demo at the first frame within "
+                        "this distance of the cube (approach), so the goal frame is "
+                        "not the grasped/lifted end. Set 0 or negative to disable.")
+    p.add_argument("--out", default="./encoder_reliability.png")
     p.add_argument("--synthetic", action="store_true",
                    help="verify analysis/plotting with fake encoders, no weights")
     run(vars(p.parse_args()))

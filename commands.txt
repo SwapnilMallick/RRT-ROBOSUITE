@@ -1,4 +1,5 @@
 # Activate the virtual environment that has robosuite installed
+
 source /Users/swapnilmallick/Desktop/VLM_JUDGE/vlm_judge_env/bin/activate
 
 # Then run the script normally
@@ -106,7 +107,7 @@ python3 rrt_latent_space/train_betavae_lpips.py \
   --key agentview_image \
   --latent 32 --beta 0.005 --anneal 10 --alpha 0.85 \
   --lpips_net alex \
-  --epochs 100 --batch 128 --lr 1e-3
+  --epochs 100 --batch 128 --lr 1e-3 \
   --ckpt_dir ./ckpt
 
   python3 rrt_latent_space/train_betavae_l1_lpips.py \
@@ -154,3 +155,28 @@ python3 ./rrt_enc/encoder_reliability_probe_v3.py \
   --demos demo_0 demo_5 demo_12 demo_30 demo_77 \
   --encoders r3m vc1 \
   --out ./rrt_enc/plots_v3/enc_3way_3.png
+
+NOTE: sideview does not improve or help rather makes things worse
+
+
+python3 ./rrt_enc/go_explore_rrt_reach.py \
+  --goal_demo_hdf5 ./datasets/lift/ph/image224.hdf5 \
+  --goal_demo demo_0 \
+  --encoder dinov2 --dino_pool cls \
+  --eps_dist 0.03 --voxel 0.05 \
+  --k_seed 30 --j_roll 20 --m_iters 4000 \
+  --save_dir ./rrt_enc/results_1 --save_every 200
+
+python3 ./rrt_enc/camera_consistency_check.py \
+  --goal_demo_hdf5 ./datasets/lift/ph/image224.hdf5 \
+  --goal_demo demo_0 --frame 0 \
+  --encoder dinov2 --dino_pool cls \
+  --out camera_check.png
+
+python3 ./rrt_enc/visualize_tree.py \
+  --tree ./rrt_enc/results_1/tree.npz \
+  --out ./rrt_enc/results_1/tree_1.png \
+  --subsample 2 --max_edges 1000
+
+
+  

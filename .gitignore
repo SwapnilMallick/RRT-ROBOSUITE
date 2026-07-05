@@ -18,8 +18,11 @@ vae_images.hdf5
 /rrt_enc/encoder_reliability_dino_mean.png
 /rrt_enc/plots_v2/
 /rrt_enc/plots_v3/
+/rrt_enc/plots_v3_1/
 /rrt_enc/demos_agentview/
 /rrt_enc/demos_sideview/
+/rrt_enc/results_1/
+camera_check.png
 /images/
 /beta_0.005/
 /ckpt/

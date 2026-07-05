@@ -163,17 +163,19 @@ class SigLIPEncoder:
     name = "SigLIP"
     backbone = "ViT-B/16 (SigLIP)"
     def __init__(self, device, hf_repo="google/siglip-base-patch16-224"):
-        from transformers import SiglipVisionModel, AutoProcessor
+        from transformers import AutoModel, AutoProcessor
         self.device = device
         self.proc = AutoProcessor.from_pretrained(hf_repo)
-        self.model = SiglipVisionModel.from_pretrained(hf_repo).to(device).eval()
+        self.model = AutoModel.from_pretrained(hf_repo).to(device).eval()
     @torch.no_grad()
     def embed(self, frames_uint8):
         from PIL import Image
         ims = [Image.fromarray(f) for f in frames_uint8]
         inp = self.proc(images=ims, return_tensors="pt").to(self.device)
-        out = self.model(**inp)
-        z = out.pooler_output                                   # (N, D) from SiglipVisionModel
+        z = self.model.get_image_features(**inp)
+        # some transformers versions return BaseModelOutputWithPooling instead of a tensor
+        if not isinstance(z, torch.Tensor):
+            z = z.pooler_output
         return torch.nn.functional.normalize(z, dim=-1).cpu().numpy()
 
 
@@ -234,7 +236,17 @@ def cube_pos_from(obs_group, key, T):
     return arr[:, :3] if arr.ndim == 2 and arr.shape[1] >= 3 else arr.reshape(T, -1)[:, :3]
 
 
-def load_demo(path, demo, image_key="agentview_image"):
+def select_reach_index(dist, eps):
+    """First frame within eps of the cube (approach moment for a REACH task),
+    else closest-approach argmin with a warning. dist is per-frame gripper-cube
+    distance."""
+    below = np.where(dist < eps)[0]
+    if len(below) > 0:
+        return int(below[0]), False
+    return int(np.argmin(dist)), True     # (idx, fell_back)
+
+
+def load_demo(path, demo, image_key="agentview_image", goal_eps=None):
     with h5py.File(path, "r") as f:
         root = f["data"] if "data" in f else f
         g = root[demo]
@@ -250,19 +262,35 @@ def load_demo(path, demo, image_key="agentview_image"):
         else:
             dist = None
             axis_kind = "FRAME INDEX (no cube key found -> proxy axis)"
+    # REACH task: truncate at the first frame within goal_eps of the cube, so the
+    # goal (last frame after truncation) is the approach moment, not grasp/lift.
+    if dist is not None and goal_eps is not None:
+        ridx, fell = select_reach_index(dist, goal_eps)
+        if fell:
+            warnings.warn(f"{demo}: no frame within goal_eps={goal_eps}; using "
+                          f"closest approach at t={ridx} as reach goal.")
+        frames = frames[:ridx + 1]
+        dist = dist[:ridx + 1]
+        axis_kind += f" | truncated at reach t={ridx}"
     return frames, dist, axis_kind
 
 
 def load_demo_two_views(path_agent, path_side, demo,
-                        agent_key="agentview_image", side_key="sideview_image"):
+                        agent_key="agentview_image", side_key="sideview_image",
+                        goal_eps=None):
     """Load agentview + sideview for one demo from TWO files, with alignment
-    verification: demo present in both, equal frame counts, and identical
-    robot0_eef_pos (same states => identical proprio, regardless of camera)."""
-    fa, da, _ = load_demo(path_agent, demo, agent_key)
+    verification (equal frame counts + identical robot0_eef_pos). Then, for the
+    REACH task, truncate BOTH views jointly at the first frame within goal_eps of
+    the cube so the goal (last frame) is the approach moment, not grasp/lift."""
     with h5py.File(path_agent, "r") as f:
         ra = f["data"] if "data" in f else f
-        eef_a = np.asarray((ra[demo]["obs"] if "obs" in ra[demo] else ra[demo])
-                           ["robot0_eef_pos"][:], np.float64)
+        oga = ra[demo]["obs"] if "obs" in ra[demo] else ra[demo]
+        fa = np.asarray(oga[agent_key][:])
+        eef_a = np.asarray(oga["robot0_eef_pos"][:], np.float64)
+        T = fa.shape[0]
+        ckey = find_cube_key(oga)
+        da = (np.linalg.norm(eef_a - cube_pos_from(oga, ckey, T), axis=1)
+              if ckey is not None else None)
     with h5py.File(path_side, "r") as f:
         rs = f["data"] if "data" in f else f
         if demo not in rs:
@@ -277,6 +305,12 @@ def load_demo_two_views(path_agent, path_side, demo,
     if max_dev > 1e-4:
         raise ValueError(f"{demo}: eef_pos differs across files (max {max_dev:.2e}) "
                          "-- the two renders are NOT the same states; alignment failed")
+    if da is not None and goal_eps is not None:
+        ridx, fell = select_reach_index(da, goal_eps)
+        if fell:
+            warnings.warn(f"{demo}: no frame within goal_eps={goal_eps}; using "
+                          f"closest approach at t={ridx} as reach goal.")
+        fa, fs, da = fa[:ridx + 1], fs[:ridx + 1], da[:ridx + 1]
     return fa, fs, da            # distance from the agentview file (identical if aligned)
 
 
@@ -328,6 +362,8 @@ def analyze_three_way(fr_agent, fr_side, dist, encoder, frame_step=1):
 def run(cfg):
     device = get_device()
     print(f"device: {device}")
+    if cfg.get("goal_eps") is not None and cfg["goal_eps"] <= 0:
+        cfg["goal_eps"] = None            # disable reach-truncation
     encoders = build_encoders(cfg, device)
     if cfg.get("hdf5_side"):
         run_three_way(cfg, device, encoders)
@@ -341,7 +377,7 @@ def run_single_view(cfg, device, encoders):
     axes = axes[0]
     summary = {e.name: [] for e in encoders}
     for di, demo in enumerate(cfg["demos"]):
-        frames, dist, axis_kind = load_demo(cfg["hdf5"], demo, cfg["image_key"])
+        frames, dist, axis_kind = load_demo(cfg["hdf5"], demo, cfg["image_key"], cfg["goal_eps"])
         if dist is None and di == 0:
             warnings.warn("No cube-position key found; x-axis falls back to frame "
                           "index (a proxy).")
@@ -385,8 +421,8 @@ def run_three_way(cfg, device, encoders):
     for demo in cfg["demos"]:
         fa, fs, dist = load_demo_two_views(
             cfg["hdf5"], cfg["hdf5_side"], demo,
-            cfg["image_key"], cfg["side_key"])
-        print(f"demo {demo}: {len(fa)} frames (agent+side aligned, eef_pos matched)")
+            cfg["image_key"], cfg["side_key"], cfg["goal_eps"])
+        print(f"demo {demo}: {len(fa)} frames (agent+side aligned, reach-truncated)")
         for ei, enc in enumerate(encoders):
             res = analyze_three_way(fa, fs, dist, enc, cfg["frame_step"])
             for vi, v in enumerate(views):
@@ -490,6 +526,10 @@ if __name__ == "__main__":
     p.add_argument("--ibot_ckpt", default=str(_HERE / "ibot_vitb16.pth"))
     p.add_argument("--mae_ckpt", default=str(_HERE / "mae_pretrain_vit_base.pth"))
     p.add_argument("--frame_step", type=int, default=1)
+    p.add_argument("--goal_eps", type=float, default=0.03,
+                   help="REACH goal: truncate each demo at the first frame within "
+                        "this distance of the cube (approach), so the goal frame is "
+                        "not the grasped/lifted end. Set 0 or negative to disable.")
     p.add_argument("--out", default=str(_HERE / "encoder_reliability.png"))
     p.add_argument("--synthetic", action="store_true",
                    help="verify analysis/plotting with fake encoders, no weights")
