@@ -22,6 +22,7 @@ vae_images.hdf5
 /rrt_enc/demos_agentview/
 /rrt_enc/demos_sideview/
 /rrt_enc/results_1/
+/rrt_ik_run1/
 camera_check.png
 /images/
 /beta_0.005/
