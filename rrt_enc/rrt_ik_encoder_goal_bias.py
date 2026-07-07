@@ -5,8 +5,8 @@ the termination checker, for the Franka cube-REACH task in robosuite.
 Per the spec (rrt_encoder.pdf):
   * Configuration space = end-effector (x, y, z), NOT the 7 joint angles.
   * Each iteration: sample q_rand uniformly in the table-workspace box, find the
-    nearest tree node q_near (Euclidean xyz), and extend GREEDILY straight to
-    q_rand (no delta clipping).
+    nearest tree node q_near (Euclidean xyz), and extend a DELTA STEP toward
+    q_rand (not fully greedy).
   * The Cartesian target is solved with a self-contained MuJoCo damped-least-
     squares (DLS) Jacobian IK -> joint angles.
   * Reset-and-replay: to position the arm at q_near, reset the env and replay the
@@ -139,7 +139,9 @@ class RobosuiteBackend:
                 self.cube_geoms.add(gid)
 
     def reset(self):
-        self.env.reset(); return self.get_q()
+        self.env.reset()
+        self.sim = self.env.sim
+        return self.get_q()
 
     def get_q(self):
         return self.sim.data.qpos[self.qpos_idx].copy()
@@ -159,12 +161,16 @@ class RobosuiteBackend:
 
     # ---- self-contained damped-least-squares Jacobian IK ------------------- #
     def solve_ik(self, target_xyz, q_init, iters=100, tol=1e-3, damping=1e-2,
-                 max_step=0.1):
+                 max_step=0.1, q_bias=None, null_space_gain=0.0):
         """Damped-least-squares IK for the grip site. Returns (q, ok). Kinematic:
-        sets qpos, mj_forward, reads site Jacobian, DLS update, clip to limits."""
+        sets qpos, mj_forward, reads site Jacobian, DLS update, clip to limits.
+        q_bias/null_space_gain pull the redundant DOF toward a reference posture
+        (e.g. the demo's reach-frame joint config) using the standard null-space
+        projection, without disturbing the primary position task."""
         import mujoco
         q = np.array(q_init, float).copy()
         m, d = self.sim.model, self.sim.data
+        n_arm = len(self._dof_idx)
         jacp = np.zeros((3, m.nv))
         for _ in range(iters):
             self.set_q(q)
@@ -183,7 +189,11 @@ class RobosuiteBackend:
             J = jacp[:, self._dof_idx]                    # 3 x 7
             # DLS: dq = J^T (J J^T + lambda^2 I)^-1 err
             JJt = J @ J.T + (damping ** 2) * np.eye(3)
-            dq = J.T @ np.linalg.solve(JJt, err)
+            J_dls = J.T @ np.linalg.inv(JJt)               # 7 x 3 damped pseudo-inverse
+            dq = J_dls @ err
+            if q_bias is not None and null_space_gain > 0:
+                null_proj = np.eye(n_arm) - J_dls @ J
+                dq = dq + null_proj @ (null_space_gain * (np.asarray(q_bias, float) - q))
             n = np.linalg.norm(dq)
             if n > max_step:
                 dq *= max_step / n
@@ -231,12 +241,15 @@ class IKRRT:
     def __init__(self, backend, encoder, goal_img, sim_threshold,
                  x_range, y_range, z_range, delta=0.05, m_iters=4000,
                  eps_dist=0.03, ik_tol=1e-3, rng_seed=0, log_every=200,
-                 save_dir=None, save_every=200, video_path=None, video_fps=10):
+                 save_dir=None, save_every=200, video_path=None, video_fps=10,
+                 goal_bias=0.15, q_bias=None, null_space_gain=0.0):
         self.b = backend; self.enc = encoder
         self.z_goal = encoder.embed(goal_img)
         self.thresh = sim_threshold
         self.xr, self.yr, self.zr = x_range, y_range, z_range
         self.delta = delta; self.m = m_iters; self.eps = eps_dist
+        self.goal_bias = goal_bias
+        self.q_bias = q_bias; self.null_space_gain = null_space_gain
         self.ik_tol = ik_tol
         self.rng = np.random.default_rng(rng_seed)
         self.log_every = log_every
@@ -256,6 +269,8 @@ class IKRRT:
         self.nodes = [Node(0, self.b.eef_pos(), q0, None, None)]
         self.reached = None; self.outcome = None
         self.collisions = self.ik_fail = self.resets = self.replay_steps = 0
+        if self.video_path:
+            self._write_video_frame(self.b.render())
 
     def _save_img(self, img, fname):
         try:
@@ -267,6 +282,8 @@ class IKRRT:
             print(f"(save failed {fname}: {ex})")
 
     def _sample(self):
+        if self.goal_bias > 0 and self.rng.random() < self.goal_bias:
+            return np.asarray(self.b.cube_pos(), float).copy()
         return np.array([self.rng.uniform(*self.xr),
                          self.rng.uniform(*self.yr),
                          self.rng.uniform(*self.zr)])
@@ -335,14 +352,17 @@ class IKRRT:
         for t in range(self.m):
             q_rand = self._sample()
             near = self._nearest(q_rand)
-            # greedy extension: IK straight to q_rand (no delta clipping)
-            dist = np.linalg.norm(q_rand - near.eef)
+            # delta step toward q_rand in Cartesian space
+            direction = q_rand - near.eef
+            dist = np.linalg.norm(direction)
             if dist < 1e-9:
                 continue
-            target = q_rand
+            target = near.eef + (direction / dist) * min(self.delta, dist)
             # position the arm at q_near (reset + replay), then IK to target
             self._reset_and_replay(near)
-            q_new, ok = self.b.solve_ik(target, near.q, tol=self.ik_tol)
+            q_new, ok = self.b.solve_ik(target, near.q, tol=self.ik_tol,
+                                        q_bias=self.q_bias,
+                                        null_space_gain=self.null_space_gain)
             if not ok:
                 self.ik_fail += 1
                 if self._log(t): pass
@@ -466,12 +486,13 @@ def run_synthetic():
     b = SyntheticBackend(); enc = SyntheticEncoder()
     rrt = IKRRT(b, enc, b.render(), sim_threshold=0.985,
                 x_range=(0.0, 0.5), y_range=(-0.25, 0.25), z_range=(0.80, 1.05),
-                delta=0.05, m_iters=600, eps_dist=0.05, log_every=200)
+                delta=0.05, m_iters=600, eps_dist=0.05, log_every=200,
+                goal_bias=0.15)
     res = rrt.run()
     print("result:", {k: (round(v, 3) if isinstance(v, float) else v)
                       for k, v in res.items()})
     assert res["nodes"] > 1
-    print("OK: sample -> nearest -> IK greedy-extend -> replay -> collision -> "
+    print("OK: sample -> nearest -> IK delta-extend -> replay -> collision -> "
           "encoder termination all run.")
 
 
@@ -491,18 +512,59 @@ if __name__ == "__main__":
     p.add_argument("--goal_eps", type=float, default=None,
                    help="reach-goal frame distance (defaults to --eps_dist)")
     p.add_argument("--delta", type=float, default=0.05, help="Cartesian step size (m)")
+    p.add_argument("--goal_bias", type=float, default=0.15,
+                   help="probability of sampling the (frozen) cube position directly "
+                        "(set to 0 to disable)")
+    p.add_argument("--null_space_gain", type=float, default=0.3,
+                   help="pulls IK's redundant DOF toward the demo's reach-frame "
+                        "joint config (0 disables the null-space bias)")
     p.add_argument("--x_range", type=float, nargs=2, default=[-0.2, 0.3])
     p.add_argument("--y_range", type=float, nargs=2, default=[-0.3, 0.3])
     p.add_argument("--z_range", type=float, nargs=2, default=[0.80, 1.05])
     p.add_argument("--m_iters", type=int, default=4000)
     p.add_argument("--ik_tol", type=float, default=1e-3)
-    p.add_argument("--seed", type=int, default=0)
+    p.add_argument("--seed", type=int, default=None)
     p.add_argument("--save_dir", default=None)
     p.add_argument("--save_every", type=int, default=200)
     p.add_argument("--save_video", default=None,
                    help="mp4 path to record every accepted extension (exploration video)")
-    p.add_argument("--video_fps", type=int, default=10)
+    p.add_argument("--video_fps", type=int, default=1)
+    p.add_argument("--log_dir", default="logs",
+                   help="directory for the timestamped run log (a .txt mirror of stdout)")
     a = p.parse_args()
+
+    import atexit
+    import datetime
+    import os
+    import sys
+
+    os.makedirs(a.log_dir, exist_ok=True)
+    log_path = os.path.join(
+        a.log_dir, f"run_{datetime.datetime.now():%Y%m%d_%H%M%S}.txt")
+    log_file = open(log_path, "w")
+
+    def _restore_and_close():
+        sys.stdout = sys.__stdout__
+        sys.stderr = sys.__stderr__
+        log_file.close()
+
+    atexit.register(_restore_and_close)
+
+    class _Tee:
+        def __init__(self, *streams):
+            self.streams = streams
+
+        def write(self, data):
+            for s in self.streams:
+                s.write(data)
+
+        def flush(self):
+            for s in self.streams:
+                s.flush()
+
+    sys.stdout = _Tee(sys.__stdout__, log_file)
+    sys.stderr = _Tee(sys.__stderr__, log_file)
+    print(f"logging to {log_path}")
 
     if a.synthetic:
         run_synthetic()
@@ -519,19 +581,24 @@ if __name__ == "__main__":
                       for i in range(og[a.image_key].shape[0])]
             eef = np.asarray(og["robot0_eef_pos"][:], float)
             obj = np.asarray(og["object"][:], float)[:, :3]
+            joint_pos = np.asarray(og["robot0_joint_pos"][:], float)
         goal_eps = a.goal_eps if a.goal_eps is not None else a.eps_dist
         ridx, _, note = select_reach_index(eef, obj, goal_eps)
         print(note)
         goal_img = frames[ridx]
         cube_xyz = obj[ridx]
-        print(f"goal frame t={ridx} | threshold {a.sim_threshold} (tweakable)")
+        q_bias = joint_pos[ridx]
+        print(f"goal frame t={ridx} | threshold {a.sim_threshold} (tweakable) | "
+              f"null_space_gain {a.null_space_gain} | goal_bias {a.goal_bias}")
         backend = RobosuiteBackend(camera=a.camera, img_hw=a.img_hw, cube_pos=cube_xyz)
         rrt = IKRRT(backend, enc, goal_img, sim_threshold=a.sim_threshold,
                     x_range=tuple(a.x_range), y_range=tuple(a.y_range),
                     z_range=tuple(a.z_range), delta=a.delta, m_iters=a.m_iters,
                     eps_dist=a.eps_dist, ik_tol=a.ik_tol, rng_seed=a.seed,
                     save_dir=a.save_dir, save_every=a.save_every,
-                    video_path=a.save_video, video_fps=a.video_fps)
+                    video_path=a.save_video, video_fps=a.video_fps,
+                    goal_bias=a.goal_bias, q_bias=q_bias,
+                    null_space_gain=a.null_space_gain)
         res = rrt.run()
         if a.save_dir:
             import os; rrt.save_tree(os.path.join(a.save_dir, "tree.npz"))

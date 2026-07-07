@@ -23,6 +23,16 @@ vae_images.hdf5
 /rrt_enc/demos_sideview/
 /rrt_enc/results_1/
 /rrt_ik_run1/
+/rrt_ik_run2/
+/rrt_ik_run3/
+/rrt_ik_run4/
+/rrt_ik_run5/
+/rrt_ik_goal_bias_run1/
+/rrt_ik_goal_bias_run2/
+/rrt_ik_goal_bias_run3/
+/rrt_ik_goal_bias_run4/
+/rrt_ik_goal_bias_run5/
+/rrt_enc/logs/
 camera_check.png
 /images/
 /beta_0.005/

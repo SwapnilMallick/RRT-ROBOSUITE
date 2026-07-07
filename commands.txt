@@ -184,4 +184,13 @@ python3 ./rrt_enc/rrt_ik_encoder.py \
   --sim_threshold 0.9 --eps_dist 0.03 --delta 0.05 \
   --x_range -0.2 0.3 --y_range -0.3 0.3 --z_range 0.80 1.05 \
   --m_iters 4000 --save_dir rrt_ik_run1 --save_every 200
-  
+
+python3 ./rrt_enc/rrt_ik_encoder_goal_bias.py \
+  --goal_demo_hdf5 ./datasets/lift/ph/image224.hdf5 --goal_demo demo_0 \
+  --encoder dinov2 --dino_pool cls \
+  --sim_threshold 0.94 --eps_dist 0.03 --delta 0.05 --goal_bias 0.0 \
+  --x_range -0.2 0.3 --y_range -0.3 0.3 --z_range 0.50 1.05 \
+  --m_iters 4000 \
+  --save_dir rrt_ik_run3 \
+  --save_video rrt_ik_goal_bias_run3/exploration.mp4 \
+  --log_dir rrt_ik_goal_bias_run3
