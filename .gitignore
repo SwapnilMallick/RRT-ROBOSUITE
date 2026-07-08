@@ -33,6 +33,9 @@ vae_images.hdf5
 /rrt_ik_goal_bias_run4/
 /rrt_ik_goal_bias_run5/
 /rrt_enc/logs/
+/rrt_enc/rrt_encoder_25_seeds_1/
+/rrt_enc/rrt_encoder_25_seeds_2/
+/rrt_enc/rrt_encoder_25_seeds_3/
 camera_check.png
 /images/
 /beta_0.005/

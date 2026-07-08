@@ -36,8 +36,15 @@ def main():
     p.add_argument("--m_iters", type=int, default=1000)
     p.add_argument("--ik_tol", type=float, default=1e-3)
     p.add_argument("--out", default=None, help="optional path to save per-seed results as JSON")
+    p.add_argument("--summary_out", default=None,
+                   help="path to save the aggregate summary as text (default: "
+                        "summary.txt next to --out, or ./summary.txt)")
+    p.add_argument("--video_dir", default=None,
+                   help="if set, saves a per-seed exploration video to <video_dir>/seed_XXXX.mp4")
+    p.add_argument("--video_fps", type=int, default=10)
     a = p.parse_args()
 
+    import os
     import torch, h5py
     from rrt_ik_encoder_goal_bias import (RobosuiteBackend, DINOv2Encoder, IKRRT,
                                            select_reach_index)
@@ -66,18 +73,38 @@ def main():
 
     backend = RobosuiteBackend(camera=a.camera, img_hw=a.img_hw, cube_pos=cube_xyz)
 
+    if a.video_dir:
+        os.makedirs(a.video_dir, exist_ok=True)
+
     results = []
     for seed in range(a.start_seed, a.start_seed + a.n_seeds):
         backend.reset()
+        video_path = (os.path.join(a.video_dir, f"seed_{seed:04d}.mp4")
+                      if a.video_dir else None)
         rrt = IKRRT(backend, enc, goal_img, sim_threshold=a.sim_threshold,
                     x_range=tuple(a.x_range), y_range=tuple(a.y_range),
                     z_range=tuple(a.z_range), delta=a.delta, m_iters=a.m_iters,
                     eps_dist=a.eps_dist, ik_tol=a.ik_tol, rng_seed=seed,
                     log_every=0, goal_bias=a.goal_bias, q_bias=q_bias,
-                    null_space_gain=a.null_space_gain)
+                    null_space_gain=a.null_space_gain,
+                    video_path=video_path, video_fps=a.video_fps)
         res = rrt.run()
         res["seed"] = seed
         results.append(res)
+
+        print(f"\n=== RESULT (seed {seed}) ===")
+        for k, v in res.items():
+            print(f"  {k}: {v}")
+        if res["terminated"]:
+            print(f"\nENCODER TERMINATED: sim {res['crossing_sim']:.4f} > "
+                  f"{res['threshold']:.4f} -> {res['verdict']} "
+                  f"(true gripper-cube dist {res['crossing_true_dist']:.4f} m vs "
+                  f"eps {a.eps_dist} m)")
+        else:
+            print(f"\nNo termination. max-sim {res['max_sim_seen']:.4f} vs "
+                  f"threshold {res['threshold']:.4f}. ik_fail {res['ik_fail']} "
+                  f"(if high, IK/workspace box needs tuning).")
+
         print(f"seed {seed:4d} | terminated={res['terminated']!s:5} "
               f"verdict={res['verdict']} sim={res['crossing_sim']} "
               f"true_dist={res['crossing_true_dist']} nodes={res['nodes']}")
@@ -90,24 +117,33 @@ def main():
     fp_sims = [r["crossing_sim"] for r in results if r["verdict"] == "FALSE_POSITIVE"]
     node_counts = [r["nodes"] for r in results]
 
-    print(f"\n=== SUMMARY over {n} seeds ===")
-    print(f"TRUE_POSITIVE:   {tp}/{n} ({100 * tp / n:.1f}%)")
-    print(f"FALSE_POSITIVE:  {fp}/{n} ({100 * fp / n:.1f}%)")
-    print(f"no termination:  {no_term}/{n} ({100 * no_term / n:.1f}%)")
+    summary_lines = [f"=== SUMMARY over {n} seeds ==="]
+    summary_lines.append(f"TRUE_POSITIVE:   {tp}/{n} ({100 * tp / n:.1f}%)")
+    summary_lines.append(f"FALSE_POSITIVE:  {fp}/{n} ({100 * fp / n:.1f}%)")
+    summary_lines.append(f"no termination:  {no_term}/{n} ({100 * no_term / n:.1f}%)")
     if tp_sims:
-        print(f"TP sim: mean {np.mean(tp_sims):.4f}  min {np.min(tp_sims):.4f}  "
-              f"max {np.max(tp_sims):.4f}")
+        summary_lines.append(f"TP sim: mean {np.mean(tp_sims):.4f}  min {np.min(tp_sims):.4f}  "
+                              f"max {np.max(tp_sims):.4f}")
     if fp_sims:
-        print(f"FP sim: mean {np.mean(fp_sims):.4f}  min {np.min(fp_sims):.4f}  "
-              f"max {np.max(fp_sims):.4f}")
-    print(f"nodes: mean {np.mean(node_counts):.1f}  min {np.min(node_counts)}  "
-          f"max {np.max(node_counts)}")
+        summary_lines.append(f"FP sim: mean {np.mean(fp_sims):.4f}  min {np.min(fp_sims):.4f}  "
+                              f"max {np.max(fp_sims):.4f}")
+    summary_lines.append(f"nodes: mean {np.mean(node_counts):.1f}  min {np.min(node_counts)}  "
+                          f"max {np.max(node_counts)}")
+
+    print("\n" + "\n".join(summary_lines))
 
     if a.out:
         import json
         with open(a.out, "w") as f:
             json.dump(results, f, indent=2)
         print(f"\nsaved per-seed results -> {a.out}")
+
+    summary_out = a.summary_out
+    if summary_out is None:
+        summary_out = os.path.join(os.path.dirname(a.out), "summary.txt") if a.out else "summary.txt"
+    with open(summary_out, "w") as f:
+        f.write("\n".join(summary_lines) + "\n")
+    print(f"saved summary -> {summary_out}")
 
 
 if __name__ == "__main__":

@@ -191,6 +191,14 @@ python3 ./rrt_enc/rrt_ik_encoder_goal_bias.py \
   --sim_threshold 0.94 --eps_dist 0.03 --delta 0.05 --goal_bias 0.0 \
   --x_range -0.2 0.3 --y_range -0.3 0.3 --z_range 0.50 1.05 \
   --m_iters 4000 \
-  --save_dir rrt_ik_run3 \
-  --save_video rrt_ik_goal_bias_run3/exploration.mp4 \
-  --log_dir rrt_ik_goal_bias_run3
+  --save_dir rrt_ik_goal_bias_run6 \
+  --save_video rrt_ik_goal_bias_run6/exploration.mp4 \
+  --log_dir rrt_ik_goal_bias_run6
+
+python3 ./rrt_enc/run_goal_bias_seeds.py \
+  --n_seeds 25 --goal_demo_hdf5 ./datasets/lift/ph/image224.hdf5 \
+  --goal_demo demo_0 --dino_pool cls \
+  --sim_threshold 0.94 --eps_dist 0.03 --delta 0.05 --goal_bias 0.0 \
+  --m_iters 4000 \
+  --video_dir ./rrt_enc/rrt_encoder_25_seeds/videos/ --out ./rrt_enc/rrt_encoder_25_seeds/results_01.json \
+  --summary_out ./rrt_enc/rrt_encoder_25_seeds/summary.txt
