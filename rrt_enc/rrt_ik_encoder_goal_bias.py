@@ -77,7 +77,7 @@ def select_reach_index(eef_pos, cube_pos, eps):
 # =========================================================================== #
 class RobosuiteBackend:
     def __init__(self, env_name="Lift", robot="Panda", camera="agentview",
-                 img_hw=224, n_collision_substeps=8, cube_pos=None):
+                 img_hw=224, n_collision_substeps=8, cube_pos=None, cube_quat_wxyz=None):
         import copy
         import robosuite as suite
         from robosuite import load_part_controller_config
@@ -89,12 +89,15 @@ class RobosuiteBackend:
         jp["kp"] = 50; jp["gripper"] = {"type": "GRIP"}
         cfg["body_parts"]["right"] = jp
         self.cube_target = None if cube_pos is None else np.asarray(cube_pos, float)
+        self.cube_quat_target = (None if cube_quat_wxyz is None
+                                  else np.asarray(cube_quat_wxyz, float))
         mk = dict(robots=robot, controller_configs=cfg, has_renderer=False,
                   has_offscreen_renderer=True, use_camera_obs=True,
                   camera_names=camera, camera_heights=img_hw, camera_widths=img_hw,
                   ignore_done=True)
         if self.cube_target is not None:
-            mk["placement_initializer"] = self._fixed_initializer(self.cube_target)
+            mk["placement_initializer"] = self._fixed_initializer(
+                self.cube_target, self.cube_quat_target)
         self.env = suite.make(env_name, **mk)
         self.camera = camera; self.img_hw = img_hw; self.n_sub = n_collision_substeps
         self.env.reset()
@@ -112,16 +115,65 @@ class RobosuiteBackend:
             raise RuntimeError(f"no grip site; sites={self.sim.model.site_names}")
         self.grip_site_name = grip[0]
         self.grip_site_id = self.sim.model.site_name2id(self.grip_site_name)
+        self._cube_qpos_addr = self._cube_dof_addr = None
         if self.cube_target is not None:
+            self._resolve_cube_qpos_addr()
+            self._freeze_cube()
             got = self.cube_pos()
             print(f"[cube frozen] target xy={np.round(self.cube_target[:2],4)} | "
                   f"spawned={np.round(got,4)} | "
                   f"xy-err {np.linalg.norm(got[:2]-self.cube_target[:2]):.4f}")
+            if self.cube_quat_target is not None:
+                got_quat = self.sim.data.body_xquat[
+                    self.sim.model.body_name2id("cube_main")].copy()
+                print(f"[cube frozen] target quat(wxyz)={np.round(self.cube_quat_target,4)} | "
+                      f"spawned quat(wxyz)={np.round(got_quat,4)}")
 
-    def _fixed_initializer(self, cube_pos):
+    def _resolve_cube_qpos_addr(self):
+        """Locate the cube's free-joint qpos/qvel offsets once (stable across
+        env.reset() calls since the MJCF doesn't change), so _freeze_cube can
+        overwrite them directly instead of relying on the placement sampler +
+        physics settling, which drifts by ~1mm reset-to-reset from contact-
+        solver warm-start residue left over from the RRT's replayed states."""
+        bid = self.sim.model.body_name2id("cube_main")
+        jid = self.sim.model.body_jntadr[bid]
+        self._cube_qpos_addr = self.sim.model.jnt_qposadr[jid]
+        self._cube_dof_addr = self.sim.model.jnt_dofadr[jid]
+
+    def _freeze_cube(self):
+        """Force the cube's free-joint qpos to the exact demo pose (bypassing
+        the placement sampler's post-spawn settling) and zero its velocity, so
+        cube_pos()/cube orientation are bit-identical to the demo after every
+        reset -- no z (or x/y/quat) jitter."""
+        if self._cube_qpos_addr is None:
+            return
+        a = self._cube_qpos_addr
+        self.sim.data.qpos[a:a + 3] = self.cube_target
+        quat = (self.cube_quat_target if self.cube_quat_target is not None
+                else np.array([1.0, 0.0, 0.0, 0.0]))
+        self.sim.data.qpos[a + 3:a + 7] = quat
+        d = self._cube_dof_addr
+        self.sim.data.qvel[d:d + 6] = 0.0
+        self.sim.forward()
+
+    def _fixed_initializer(self, cube_pos, cube_quat_wxyz=None):
+        """Deterministic placement at the demo's (x, y) with the demo's actual
+        orientation. UniformRandomSampler._sample_quat only supports a rotation
+        about a single fixed axis (rotation=<float>), which forces identity for
+        any demo quat that isn't a pure z-rotation -- so we subclass it and
+        override _sample_quat to return the exact demo quaternion (wxyz) every
+        call, leaving the rest of the (retry / z-offset / init_quat-multiply)
+        sampling logic untouched."""
         from robosuite.utils.placement_samplers import UniformRandomSampler
         cx, cy = float(cube_pos[0]), float(cube_pos[1])
-        return UniformRandomSampler(
+        quat_fixed = (np.array([1.0, 0.0, 0.0, 0.0]) if cube_quat_wxyz is None
+                      else np.asarray(cube_quat_wxyz, float).copy())
+
+        class _FixedPoseSampler(UniformRandomSampler):
+            def _sample_quat(self):
+                return quat_fixed.copy()
+
+        return _FixedPoseSampler(
             name="ObjectSampler", x_range=[cx, cx], y_range=[cy, cy],
             rotation=0.0, rotation_axis="z", ensure_object_boundary_in_range=False,
             ensure_valid_placement=False, reference_pos=(0.0, 0.0, 0.8), z_offset=0.01)
@@ -141,6 +193,7 @@ class RobosuiteBackend:
     def reset(self):
         self.env.reset()
         self.sim = self.env.sim
+        self._freeze_cube()
         return self.get_q()
 
     def get_q(self):
@@ -580,17 +633,22 @@ if __name__ == "__main__":
             frames = [np.asarray(og[a.image_key][i])
                       for i in range(og[a.image_key].shape[0])]
             eef = np.asarray(og["robot0_eef_pos"][:], float)
-            obj = np.asarray(og["object"][:], float)[:, :3]
+            obj_full = np.asarray(og["object"][:], float)
+            obj = obj_full[:, :3]
+            obj_quat_xyzw = obj_full[:, 3:7]
             joint_pos = np.asarray(og["robot0_joint_pos"][:], float)
         goal_eps = a.goal_eps if a.goal_eps is not None else a.eps_dist
         ridx, _, note = select_reach_index(eef, obj, goal_eps)
         print(note)
         goal_img = frames[ridx]
         cube_xyz = obj[ridx]
+        from robosuite.utils.transform_utils import convert_quat
+        cube_quat_wxyz = convert_quat(obj_quat_xyzw[ridx], to="wxyz")
         q_bias = joint_pos[ridx]
         print(f"goal frame t={ridx} | threshold {a.sim_threshold} (tweakable) | "
               f"null_space_gain {a.null_space_gain} | goal_bias {a.goal_bias}")
-        backend = RobosuiteBackend(camera=a.camera, img_hw=a.img_hw, cube_pos=cube_xyz)
+        backend = RobosuiteBackend(camera=a.camera, img_hw=a.img_hw, cube_pos=cube_xyz,
+                                    cube_quat_wxyz=cube_quat_wxyz)
         rrt = IKRRT(backend, enc, goal_img, sim_threshold=a.sim_threshold,
                     x_range=tuple(a.x_range), y_range=tuple(a.y_range),
                     z_range=tuple(a.z_range), delta=a.delta, m_iters=a.m_iters,

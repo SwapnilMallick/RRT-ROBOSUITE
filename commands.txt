@@ -200,5 +200,33 @@ python3 ./rrt_enc/run_goal_bias_seeds.py \
   --goal_demo demo_0 --dino_pool cls \
   --sim_threshold 0.94 --eps_dist 0.03 --delta 0.05 --goal_bias 0.0 \
   --m_iters 4000 \
-  --video_dir ./rrt_enc/rrt_encoder_25_seeds/videos/ --out ./rrt_enc/rrt_encoder_25_seeds/results_01.json \
-  --summary_out ./rrt_enc/rrt_encoder_25_seeds/summary.txt
+  --video_dir ./rrt_enc/rrt_dinov2_results/demo_0/rrt_encoder_25_seeds_0.0/videos/ \
+  --out ./rrt_enc/rrt_dinov2_results/demo_0/rrt_encoder_25_seeds_0.0/results.json \
+  --summary_out ./rrt_enc/rrt_dinov2_results/demo_0/rrt_encoder_25_seeds_0.0/summary.txt
+
+python3 ./rrt_enc/run_goal_bias_seeds.py \
+  --n_seeds 25 --goal_demo_hdf5 ./datasets/lift/ph/image224.hdf5 \
+  --goal_demo demo_0 --dino_pool cls \
+  --sim_threshold 0.94 --eps_dist 0.03 --delta 0.05 --goal_bias 0.05 \
+  --m_iters 4000 \
+  --video_dir ./rrt_enc/rrt_dinov2_results/demo_0/rrt_encoder_25_seeds_0.05/videos/ \
+  --out ./rrt_enc/rrt_dinov2_results/demo_0/rrt_encoder_25_seeds_0.05/results.json \
+  --summary_out ./rrt_enc/rrt_dinov2_results/demo_0/rrt_encoder_25_seeds_0.05/summary.txt
+
+python3 ./rrt_enc/run_goal_bias_seeds.py \
+  --n_seeds 25 --goal_demo_hdf5 ./datasets/lift/ph/image224.hdf5 \
+  --goal_demo demo_0 --dino_pool cls \
+  --sim_threshold 0.94 --eps_dist 0.03 --delta 0.05 --goal_bias 0.10 \
+  --m_iters 4000 \
+  --video_dir ./rrt_enc/rrt_dinov2_results/demo_0/rrt_encoder_25_seeds_0.10/videos/ \
+  --out ./rrt_enc/rrt_dinov2_results/demo_0/rrt_encoder_25_seeds_0.10/results.json \
+  --summary_out ./rrt_enc/rrt_dinov2_results/demo_0/rrt_encoder_25_seeds_0.10/summary.txt
+
+python3 ./rrt_enc/run_goal_bias_seeds.py \
+  --n_seeds 25 --goal_demo_hdf5 ./datasets/lift/ph/image224.hdf5 \
+  --goal_demo demo_0 --dino_pool cls \
+  --sim_threshold 0.94 --eps_dist 0.03 --delta 0.05 --goal_bias 0.15 \
+  --m_iters 4000 \
+  --video_dir ./rrt_enc/rrt_dinov2_results/demo_0/rrt_encoder_25_seeds_0.15/videos/ \
+  --out ./rrt_enc/rrt_dinov2_results/demo_0/rrt_encoder_25_seeds_0.15/results.json \
+  --summary_out ./rrt_enc/rrt_dinov2_results/demo_0/rrt_encoder_25_seeds_0.15/summary.txt

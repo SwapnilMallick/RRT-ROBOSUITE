@@ -145,6 +145,11 @@ def main():
         f.write("\n".join(summary_lines) + "\n")
     print(f"saved summary -> {summary_out}")
 
+    from PIL import Image
+    goal_frame_path = os.path.join(os.path.dirname(summary_out) or ".", "goal_frame.png")
+    Image.fromarray(np.asarray(goal_img, np.uint8)).save(goal_frame_path)
+    print(f"saved goal frame -> {goal_frame_path}")
+
 
 if __name__ == "__main__":
     main()
