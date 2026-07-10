@@ -26,11 +26,12 @@ without robosuite/MuJoCo/weights.
 """
 
 import argparse
+import os
 import numpy as np
 
 
 # =========================================================================== #
-# Encoders (DINOv2 default; I-JEPA available) -- single-image interface
+# Encoders (DINOv2 default; I-JEPA / iBOT available) -- single-image interface
 # =========================================================================== #
 class DINOv2Encoder:
     name = "DINOv2"
@@ -51,6 +52,35 @@ class DINOv2Encoder:
                 z = self.model(x)
             else:
                 z = self.model.forward_features(x)["x_norm_patchtokens"].mean(1)
+            z = torch.nn.functional.normalize(z, dim=-1)
+        return z[0].cpu().numpy()
+
+
+class IBOTEncoder:
+    name = "iBOT"
+    backbone = "ViT-B/16 (iBOT)"
+    def __init__(self, device, ckpt_path="ibot_vitb16.pth", pooling="cls"):
+        # iBOT release is ViT (no Swin checkpoint). Build a timm ViT-B/16 and load
+        # the iBOT state dict (download the checkpoint from bytedance/ibot first).
+        import timm
+        import torch
+        import torchvision.transforms as T
+        self.torch = torch; self.device = device; self.pooling = pooling
+        self.model = timm.create_model("vit_base_patch16_224", pretrained=False,
+                                       num_classes=0).to(device).eval()
+        sd = torch.load(ckpt_path, map_location="cpu")
+        sd = sd.get("state_dict", sd.get("teacher", sd))
+        sd = {k.replace("module.", "").replace("backbone.", ""): v for k, v in sd.items()}
+        self.model.load_state_dict(sd, strict=False)
+        self.tf = T.Compose([
+            T.ToPILImage(), T.Resize(256), T.CenterCrop(224), T.ToTensor(),
+            T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])])
+    def embed(self, img_uint8):
+        import torch
+        with torch.no_grad():
+            x = self.tf(img_uint8).unsqueeze(0).to(self.device)
+            tok = self.model.forward_features(x)              # (1, 1+P, D)
+            z = tok[:, 0] if self.pooling == "cls" else tok[:, 1:].mean(1)
             z = torch.nn.functional.normalize(z, dim=-1)
         return z[0].cpu().numpy()
 
@@ -557,8 +587,11 @@ if __name__ == "__main__":
     p.add_argument("--image_key", default="agentview_image")
     p.add_argument("--camera", default="agentview")
     p.add_argument("--img_hw", type=int, default=224)
-    p.add_argument("--encoder", default="dinov2", choices=["dinov2"])
+    p.add_argument("--encoder", default="dinov2", choices=["dinov2", "ibot"])
     p.add_argument("--dino_pool", default="cls", choices=["cls", "mean"])
+    p.add_argument("--ibot_pool", default="cls", choices=["cls", "mean"])
+    p.add_argument("--ibot_ckpt", default=os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "ibot_vitb16.pth"))
     p.add_argument("--sim_threshold", type=float, required=False, default=0.6,
                    help="cosine-sim termination threshold (plain tweakable parameter)")
     p.add_argument("--eps_dist", type=float, default=0.03)
@@ -626,7 +659,12 @@ if __name__ == "__main__":
         device = torch.device("mps" if torch.backends.mps.is_available()
                               else ("cuda" if torch.cuda.is_available() else "cpu"))
         print("device:", device)
-        enc = DINOv2Encoder(device, pooling=a.dino_pool)
+        if a.encoder == "dinov2":
+            enc = DINOv2Encoder(device, pooling=a.dino_pool)
+        elif a.encoder == "ibot":
+            enc = IBOTEncoder(device, ckpt_path=a.ibot_ckpt, pooling=a.ibot_pool)
+        else:
+            raise ValueError(f"unknown encoder '{a.encoder}'")
         with h5py.File(a.goal_demo_hdf5, "r") as f:
             root = f["data"] if "data" in f else f
             og = root[a.goal_demo]["obs"]

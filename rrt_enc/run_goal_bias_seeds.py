@@ -2,8 +2,8 @@
 Batch runner for rrt_ik_encoder_goal_bias.py: runs IKRRT across multiple seeds
 (against the same frozen cube / goal frame) and reports aggregate TP/FP/
 no-termination statistics. Encoder + demo data are loaded once and the
-robosuite backend is reused (reset between seeds) to avoid reloading DINOv2 /
-recompiling the MuJoCo model per seed.
+robosuite backend is reused (reset between seeds) to avoid reloading the
+encoder (DINOv2 or iBOT) / recompiling the MuJoCo model per seed.
 
 Usage:
     python run_goal_bias_seeds.py --n_seeds 25
@@ -23,7 +23,11 @@ def main():
     p.add_argument("--image_key", default="agentview_image")
     p.add_argument("--camera", default="agentview")
     p.add_argument("--img_hw", type=int, default=224)
+    p.add_argument("--encoder", default="dinov2", choices=["dinov2", "ibot"])
     p.add_argument("--dino_pool", default="cls", choices=["cls", "mean"])
+    p.add_argument("--ibot_pool", default="cls", choices=["cls", "mean"])
+    p.add_argument("--ibot_ckpt", default=None,
+                   help="defaults to ibot_vitb16.pth next to rrt_ik_encoder_goal_bias.py")
     p.add_argument("--sim_threshold", type=float, default=0.9)
     p.add_argument("--eps_dist", type=float, default=0.03)
     p.add_argument("--goal_eps", type=float, default=None)
@@ -46,20 +50,29 @@ def main():
 
     import os
     import torch, h5py
-    from rrt_ik_encoder_goal_bias import (RobosuiteBackend, DINOv2Encoder, IKRRT,
-                                           select_reach_index)
+    from rrt_ik_encoder_goal_bias import (RobosuiteBackend, DINOv2Encoder, IBOTEncoder,
+                                           IKRRT, select_reach_index)
 
     device = torch.device("mps" if torch.backends.mps.is_available()
                           else ("cuda" if torch.cuda.is_available() else "cpu"))
     print("device:", device)
-    enc = DINOv2Encoder(device, pooling=a.dino_pool)
+    if a.encoder == "dinov2":
+        enc = DINOv2Encoder(device, pooling=a.dino_pool)
+    elif a.encoder == "ibot":
+        ibot_ckpt = a.ibot_ckpt or os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "ibot_vitb16.pth")
+        enc = IBOTEncoder(device, ckpt_path=ibot_ckpt, pooling=a.ibot_pool)
+    else:
+        raise ValueError(f"unknown encoder '{a.encoder}'")
 
     with h5py.File(a.goal_demo_hdf5, "r") as f:
         root = f["data"] if "data" in f else f
         og = root[a.goal_demo]["obs"]
         frames = [np.asarray(og[a.image_key][i]) for i in range(og[a.image_key].shape[0])]
         eef = np.asarray(og["robot0_eef_pos"][:], float)
-        obj = np.asarray(og["object"][:], float)[:, :3]
+        obj_full = np.asarray(og["object"][:], float)
+        obj = obj_full[:, :3]
+        obj_quat_xyzw = obj_full[:, 3:7]
         joint_pos = np.asarray(og["robot0_joint_pos"][:], float)
 
     goal_eps = a.goal_eps if a.goal_eps is not None else a.eps_dist
@@ -67,11 +80,14 @@ def main():
     print(note)
     goal_img = frames[ridx]
     cube_xyz = obj[ridx]
+    from robosuite.utils.transform_utils import convert_quat
+    cube_quat_wxyz = convert_quat(obj_quat_xyzw[ridx], to="wxyz")
     q_bias = joint_pos[ridx]
     print(f"goal frame t={ridx} | threshold {a.sim_threshold} | "
           f"null_space_gain {a.null_space_gain} | n_seeds {a.n_seeds}")
 
-    backend = RobosuiteBackend(camera=a.camera, img_hw=a.img_hw, cube_pos=cube_xyz)
+    backend = RobosuiteBackend(camera=a.camera, img_hw=a.img_hw, cube_pos=cube_xyz,
+                                cube_quat_wxyz=cube_quat_wxyz)
 
     if a.video_dir:
         os.makedirs(a.video_dir, exist_ok=True)
